@@ -1,0 +1,13 @@
+[
+  {
+    "name": "Music",
+    "command": "\"C:\\Users\\ruoso\\AppData\\Local\\Programs\\Python\\Python314\\python.exe\" \"C:/Users/ruoso/Documents/server/Music/music_server.py\"",
+    "port": 5000,
+    "protocol": "TCP",
+    "workdir": "C:/Users/ruoso/Documents/server/Music",
+    "upnp": true,
+    "tunnel_mode": "quick",
+    "tunnel_token": "",
+    "local_https": true
+  }
+]
