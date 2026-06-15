@@ -18,7 +18,5 @@
 
 ## ⚙️ インストールと使い方
 
-### 1. リポジトリのクローン
-```bash
-git clone [https://github.com/](https://github.com/)[ユーザー名]/Port_maneger.git
-cd Port_maneger
+### ダウンロード
+**
