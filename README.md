@@ -3,7 +3,7 @@
 `Port_maneger` は、ポート開放、ルーター設定、そして Cloudflare を利用したトンネリングを自動化・簡略化するための Python ツールです。複雑なネットワーク設定を簡単な操作で完結させることを目指しています。
 
 ## 🚀 主な機能
-* **Play it を使用して、Minecraft serverの公開が可能
+* Play it を使用して、**Minecraft serverの公開が可能**
 * **自動ポート開放 & ルーター設定**: 手動での面倒なルーター設定を自動化。
 * **UPnP 対応**: UPnP（Universal Plug and Play）を利用したスムーズなポートマッピング。
 * **Cloudflare トンネルの統合**:
