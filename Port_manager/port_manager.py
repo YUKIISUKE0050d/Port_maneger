@@ -18,6 +18,7 @@ from tkinter import ttk, messagebox, filedialog
 
 import upnp_client
 import cloudflare_tunnel
+import playit_agent
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "servers.json")
 FW_RULE_PREFIX = "PortMgr_"
@@ -113,7 +114,7 @@ class ServerEntry:
         self.protocol = protocol
         self.workdir = workdir
         self.upnp = upnp  # UPnPでルーターのポートも自動開放するか
-        self.tunnel_mode = tunnel_mode  # "none" / "quick" / "named"
+        self.tunnel_mode = tunnel_mode  # "none" / "quick" / "named" / "playit"
         self.tunnel_token = tunnel_token  # named tunnel用トークン
         self.local_https = local_https  # ローカルサーバーがHTTPS(自己署名証明書)か
 
@@ -125,6 +126,10 @@ class ServerEntry:
 
         self.tunnel_proc = None
         self.tunnel_url = None
+
+        # playit.gg専用
+        self.playit_proc = None
+        self.playit_addr = None
 
     def to_dict(self):
         return {
@@ -201,8 +206,8 @@ class PortManagerApp(tk.Tk):
 
         ttk.Label(frm, text="外部公開:").grid(row=3, column=2, padx=4, pady=4, sticky="e")
         self.combo_tunnel = ttk.Combobox(
-            frm, values=["なし", "Cloudflare Quick Tunnel", "Cloudflare Named Tunnel"],
-            width=24, state="readonly"
+            frm, values=["なし", "Cloudflare Quick Tunnel", "Cloudflare Named Tunnel", "Playit.gg (TCP/UDP対応)"],
+            width=28, state="readonly"
         )
         self.combo_tunnel.set("なし")
         self.combo_tunnel.grid(row=3, column=3, padx=4, pady=4, sticky="w")
@@ -221,6 +226,11 @@ class PortManagerApp(tk.Tk):
         ttk.Button(frm, text="登録する", command=self.add_server).grid(row=3, column=5, padx=4, pady=6, sticky="e")
         ttk.Button(frm, text="外部IPを確認", command=self.check_external_ip).grid(row=3, column=4, padx=4, pady=6, sticky="e")
         ttk.Button(frm, text="cloudflaredを準備", command=self.prepare_cloudflared).grid(row=4, column=5, padx=4, pady=6, sticky="e")
+
+        btn_playit_frame = ttk.Frame(frm)
+        btn_playit_frame.grid(row=5, column=5, padx=4, pady=2, sticky="e")
+        ttk.Button(btn_playit_frame, text="playitを準備", command=self.prepare_playit).pack(side="top", fill="x", pady=1)
+        ttk.Button(btn_playit_frame, text="ダッシュボード", command=playit_agent.open_dashboard).pack(side="top", fill="x", pady=1)
 
         for c in range(6):
             frm.grid_columnconfigure(c, weight=1 if c in (1, 3) else 0)
@@ -276,6 +286,32 @@ class PortManagerApp(tk.Tk):
             self.entry_tunnel_token.delete(0, tk.END)
             self.entry_tunnel_token.config(state="disabled")
 
+    def prepare_playit(self):
+        if playit_agent.is_installed():
+            messagebox.showinfo("確認", "playitは既にインストールされています。")
+            return
+        if not messagebox.askyesno("確認",
+            "Minecraftなど生TCP/UDPの外部公開に使う playit.gg をダウンロードします。\nよろしいですか?"):
+            return
+        self.status_label.config(text="playitをダウンロード中...", foreground="blue")
+        threading.Thread(target=self._download_playit_async, daemon=True).start()
+
+    def _download_playit_async(self):
+        try:
+            playit_agent.download_playit()
+            self.after(0, lambda: self._on_playit_download_done(True, None))
+        except Exception as e:
+            self.after(0, lambda: self._on_playit_download_done(False, str(e)))
+
+    def _on_playit_download_done(self, ok, err):
+        self.status_label.config(text="管理者権限で実行中(自動取得済み)", foreground="green")
+        if ok:
+            messagebox.showinfo("完了", "playitのダウンロードが完了しました。\n\n"
+                "初回起動時にブラウザでクレーム承認が必要です。\n"
+                "承認後、playit.ggダッシュボードでトンネルを作成してください。")
+        else:
+            messagebox.showerror("エラー", f"ダウンロードに失敗しました:\n{err}")
+
     def prepare_cloudflared(self):
         if cloudflare_tunnel.is_installed():
             messagebox.showinfo("確認", "cloudflaredは既にインストールされています。")
@@ -310,10 +346,11 @@ class PortManagerApp(tk.Tk):
         if not sel:
             return
         s = self.servers[int(sel[0])]
-        if s.tunnel_url:
+        addr = s.playit_addr if s.tunnel_mode == "playit" else s.tunnel_url
+        if addr:
             self.clipboard_clear()
-            self.clipboard_append(s.tunnel_url)
-            messagebox.showinfo("コピーしました", f"URLをクリップボードにコピーしました:\n{s.tunnel_url}")
+            self.clipboard_append(addr)
+            messagebox.showinfo("コピーしました", f"アドレスをクリップボードにコピーしました:\n{addr}")
 
     def browse_command(self):
         path = filedialog.askopenfilename(title="起動するプログラムを選択")
@@ -343,6 +380,11 @@ class PortManagerApp(tk.Tk):
 
             if s.tunnel_mode == "none":
                 url_text = ""
+            elif s.tunnel_mode == "playit":
+                if s.running:
+                    url_text = s.playit_addr if s.playit_addr else "接続中..."
+                else:
+                    url_text = "(停止中)"
             elif s.running:
                 url_text = s.tunnel_url if s.tunnel_url else "起動中..."
             else:
@@ -406,6 +448,7 @@ class PortManagerApp(tk.Tk):
             "なし": "none",
             "Cloudflare Quick Tunnel": "quick",
             "Cloudflare Named Tunnel": "named",
+            "Playit.gg (TCP/UDP対応)": "playit",
         }
         tunnel_mode = tunnel_mode_map.get(tunnel_label, "none")
         tunnel_token = self.entry_tunnel_token.get().strip()
@@ -415,17 +458,27 @@ class PortManagerApp(tk.Tk):
             return
 
         if tunnel_mode in ("quick", "named") and not cloudflare_tunnel.is_installed():
-            if not messagebox.askyesno(
-                "確認",
+            if not messagebox.askyesno("確認",
                 "cloudflaredが未インストールです。今すぐダウンロードしますか?\n"
-                "(後で「cloudflaredを準備」ボタンからも実行できます)"
-            ):
+                "(後で「cloudflaredを準備」ボタンからも実行できます)"):
                 tunnel_mode = "none"
             else:
                 try:
                     cloudflare_tunnel.download_cloudflared()
                 except Exception as e:
                     messagebox.showerror("エラー", f"cloudflaredのダウンロードに失敗しました:\n{e}")
+                    tunnel_mode = "none"
+
+        if tunnel_mode == "playit" and not playit_agent.is_installed():
+            if not messagebox.askyesno("確認",
+                "playitが未インストールです。今すぐダウンロードしますか?\n"
+                "(後で「playitを準備」ボタンからも実行できます)"):
+                tunnel_mode = "none"
+            else:
+                try:
+                    playit_agent.download_playit()
+                except Exception as e:
+                    messagebox.showerror("エラー", f"playitのダウンロードに失敗しました:\n{e}")
                     tunnel_mode = "none"
 
         entry = ServerEntry(name, cmd, int(port_str), proto, workdir, self.var_upnp.get(),
@@ -506,12 +559,48 @@ class PortManagerApp(tk.Tk):
             self._start_tunnel(s)
 
     def _start_tunnel(self, s: ServerEntry):
+        # --- Playit.gg (TCP/UDP) ---
+        if s.tunnel_mode == "playit":
+            if not playit_agent.is_installed():
+                messagebox.showwarning("playit未インストール",
+                    "生TCP/UDP公開(playit.gg)を行うにはplayitが必要です。\n"
+                    "「playitを準備」ボタンからダウンロードしてください。")
+                return
+
+            s.playit_addr = None
+
+            def on_claim_url(url):
+                self.after(0, self._on_playit_claim, s, url)
+
+            def on_connected():
+                self.after(0, self._on_playit_connected, s)
+
+            def on_tunnel_addr(addr):
+                if s.playit_addr != addr:
+                    s.playit_addr = addr
+                    self.after(0, self._refresh_list)
+
+            def on_exit():
+                self.after(0, self._on_playit_exit, s)
+
+            try:
+                s.playit_proc = playit_agent.start_agent(
+                    on_claim_url=on_claim_url,
+                    on_connected=on_connected,
+                    on_tunnel_addr=on_tunnel_addr,
+                    on_exit=on_exit,
+                )
+            except Exception as e:
+                messagebox.showerror("playit起動エラー", f"playitの起動に失敗しました:\n{e}")
+                s.playit_proc = None
+            self._refresh_list()
+            return
+
+        # --- Cloudflare Tunnel (HTTP/HTTPS) ---
         if not cloudflare_tunnel.is_installed():
-            messagebox.showwarning(
-                "cloudflared未インストール",
+            messagebox.showwarning("cloudflared未インストール",
                 "外部公開(Cloudflare Tunnel)を行うにはcloudflaredが必要です。\n"
-                "「cloudflaredを準備」ボタンからダウンロードしてください。"
-            )
+                "「cloudflaredを準備」ボタンからダウンロードしてください。")
             return
 
         s.tunnel_url = None
@@ -528,18 +617,42 @@ class PortManagerApp(tk.Tk):
             if s.tunnel_mode == "quick":
                 scheme = "https" if s.local_https else "http"
                 s.tunnel_proc = cloudflare_tunnel.start_quick_tunnel(
-                    s.port, on_url_found=on_url_found, on_exit=on_exit, origin_scheme=scheme
-                )
+                    s.port, on_url_found=on_url_found, on_exit=on_exit, origin_scheme=scheme)
             elif s.tunnel_mode == "named":
                 s.tunnel_url = "(Named Tunnel - ダッシュボードでURL確認)"
                 s.tunnel_proc = cloudflare_tunnel.start_named_tunnel(
-                    s.tunnel_token, on_exit=on_exit
-                )
+                    s.tunnel_token, on_exit=on_exit)
         except Exception as e:
             messagebox.showerror("Tunnel起動エラー", f"Cloudflare Tunnelの起動に失敗しました:\n{e}")
             s.tunnel_proc = None
 
         self._refresh_list()
+
+    def _on_playit_claim(self, s: ServerEntry, url):
+        """初回クレームURL → ブラウザを自動起動してユーザーに承認を促す"""
+        playit_agent.open_claim_url(url)
+        messagebox.showinfo(
+            "playit.gg 初回承認が必要",
+            f"ブラウザが開きました。playit.ggにログインして「Claim Agent」を押してください。\n\n"
+            f"承認後、playit.ggダッシュボード(https://playit.gg/account/tunnels)で\n"
+            f"トンネルを作成し、ローカルアドレスに 127.0.0.1:{s.port} を設定してください。\n\n"
+            f"一度承認すれば次回以降は自動で繋がります。"
+        )
+
+    def _on_playit_connected(self, s: ServerEntry):
+        self._refresh_list()
+        if not playit_agent.is_claimed():
+            return
+        if s.playit_addr:
+            return  # アドレスが既に判明していれば通知済み
+
+    def _on_playit_exit(self, s: ServerEntry):
+        if not s.running:
+            return
+        s.playit_proc = None
+        s.playit_addr = None
+        self._refresh_list()
+        messagebox.showwarning("playit停止", f"「{s.name}」のplayitエージェントが終了しました。")
 
     def _notify_tunnel_url(self, s: ServerEntry, url):
         messagebox.showinfo(
@@ -562,6 +675,10 @@ class PortManagerApp(tk.Tk):
             cloudflare_tunnel.stop_tunnel(s.tunnel_proc)
             s.tunnel_proc = None
         s.tunnel_url = None
+        if s.playit_proc is not None:
+            playit_agent.stop_agent(s.playit_proc)
+            s.playit_proc = None
+        s.playit_addr = None
 
     def _upnp_open_async(self, s: ServerEntry):
         try:
