@@ -1,38 +1,37 @@
 # -*- coding: utf-8 -*-
 """
 playit.gg エージェント管理ヘルパー。
-- playitバイナリの自動ダウンロード(Windows/Linux/Mac対応)
+- GitHub APIで最新リリースを動的取得してダウンロード
 - 初回クレームURL検出・ブラウザ自動起動
 - SECRET_KEY / toml設定ファイルによる起動
 - TCP/UDP両対応(Minecraftなどゲームサーバーに最適)
-
-【使い方の流れ】
-1. download_playit() でバイナリ取得
-2. start_agent() で起動 → 初回はクレームURLが出るのでブラウザ承認
-3. ダッシュボードでトンネル作成(TCP/UDP・ポート設定)
-4. 以降は start_agent() だけで自動接続
 """
 
 import os
 import re
 import sys
 import stat
+import json
 import platform
 import subprocess
 import threading
 import webbrowser
 import urllib.request
+import urllib.error
 
-BIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+BIN_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playit_data")
 
-PLAYIT_DOWNLOAD_URLS = {
-    ("Windows", "AMD64"): "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-windows_64.exe",
-    ("Windows", "x86"):   "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-windows_32.exe",
-    ("Linux",   "x86_64"):"https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux_64",
-    ("Linux",   "aarch64"):"https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux_arm64",
-    ("Darwin",  "x86_64"):"https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-darwin_64",
-    ("Darwin",  "arm64"): "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-darwin_arm64",
+GITHUB_API_URL = "https://api.github.com/repos/playit-cloud/playit-agent/releases/latest"
+
+# アセット名のパターン: OS + アーキ → 正規表現で一致させる
+ASSET_PATTERNS = {
+    ("Windows", "x86_64"): re.compile(r"playit-windows-x86_64.*\.exe$", re.IGNORECASE),
+    ("Windows", "x86"):    re.compile(r"playit-windows-x86[^_].*\.exe$", re.IGNORECASE),
+    ("Linux",   "x86_64"): re.compile(r"playit-linux-amd64$", re.IGNORECASE),
+    ("Linux",   "aarch64"):re.compile(r"playit-linux-arm64$",  re.IGNORECASE),
+    ("Darwin",  "x86_64"): re.compile(r"playit-darwin-amd64$", re.IGNORECASE),
+    ("Darwin",  "arm64"):  re.compile(r"playit-darwin-arm64$",  re.IGNORECASE),
 }
 
 
@@ -50,32 +49,65 @@ def is_installed():
 
 
 def is_claimed():
-    """tomlが存在 = 既にクレーム済み・シークレットキー保存済み"""
     return os.path.exists(_toml_path())
+
+
+def _normalize_arch():
+    machine = platform.machine()
+    if machine in ("AMD64", "x86_64", "amd64"):
+        return "x86_64"
+    if machine in ("ARM64", "arm64", "aarch64"):
+        return "aarch64" if platform.system() == "Linux" else "arm64"
+    if machine in ("i386", "i686", "x86"):
+        return "x86"
+    return machine
+
+
+def _fetch_latest_asset_url():
+    """GitHub APIで最新リリースのアセット一覧を取得し、対応するダウンロードURLを返す"""
+    system = platform.system()
+    arch   = _normalize_arch()
+    key    = (system, arch)
+
+    pattern = ASSET_PATTERNS.get(key)
+    if pattern is None:
+        raise RuntimeError(f"このOS/アーキテクチャには対応していません: {system}/{arch}")
+
+    req = urllib.request.Request(
+        GITHUB_API_URL,
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "PortManagerTool/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+
+    assets = data.get("assets", [])
+    if not assets:
+        raise RuntimeError("GitHubリリースにアセットが見つかりませんでした")
+
+    # signed版を優先、なければそれ以外
+    signed   = [a for a in assets if pattern.match(a["name"]) and "signed" in a["name"]]
+    unsigned = [a for a in assets if pattern.match(a["name"]) and "signed" not in a["name"]]
+    matched  = signed or unsigned
+
+    if not matched:
+        names = [a["name"] for a in assets]
+        raise RuntimeError(
+            f"{system}/{arch} 向けのバイナリが見つかりませんでした。\n"
+            f"利用可能なアセット: {names}"
+        )
+
+    return matched[0]["browser_download_url"], data.get("tag_name", "")
 
 
 def download_playit(progress_callback=None):
     """playitバイナリを ./bin にダウンロードする。失敗時は例外を投げる。"""
-    system = platform.system()
-    machine = platform.machine()
-
-    # アーキテクチャ名の正規化
-    if machine in ("AMD64", "x86_64", "amd64"):
-        machine_key = "AMD64" if system == "Windows" else "x86_64"
-    elif machine in ("ARM64", "arm64", "aarch64"):
-        machine_key = "arm64" if system == "Darwin" else "aarch64"
-    else:
-        machine_key = machine
-
-    key = (system, machine_key)
-    if key not in PLAYIT_DOWNLOAD_URLS:
-        raise RuntimeError(f"このOS/アーキテクチャには対応していません: {system}/{machine}")
-
-    url = PLAYIT_DOWNLOAD_URLS[key]
     os.makedirs(BIN_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
+
+    url, tag = _fetch_latest_asset_url()
     dest = _binary_path()
-    tmp = dest + ".download"
+    tmp  = dest + ".download"
 
     def _report(blocknum, blocksize, totalsize):
         if progress_callback and totalsize > 0:
@@ -89,20 +121,16 @@ def download_playit(progress_callback=None):
         st = os.stat(dest)
         os.chmod(dest, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    return dest
+    return dest, tag
 
 
 def start_agent(
-    on_claim_url=None,    # コールバック(url: str) - 初回クレームURL検出時
-    on_connected=None,    # コールバック() - エージェント接続完了時
-    on_tunnel_addr=None,  # コールバック(addr: str) - トンネルアドレス判明時
-    on_log=None,          # コールバック(line: str) - ログ行ごと
-    on_exit=None,         # コールバック() - プロセス終了時
+    on_claim_url=None,
+    on_connected=None,
+    on_tunnel_addr=None,
+    on_log=None,
+    on_exit=None,
 ):
-    """
-    playitエージェントを起動する。Popenオブジェクトを返す。
-    出力解析は別スレッドで行い、各コールバックで通知する。
-    """
     binary = _binary_path()
     if not os.path.exists(binary):
         raise RuntimeError("playitがインストールされていません")
@@ -126,13 +154,15 @@ def start_agent(
         cwd=DATA_DIR,
     )
 
-    # クレームURL・接続状態・トンネルアドレスを出力から解析するパターン
-    CLAIM_PATTERN    = re.compile(r"https://playit\.gg/claim/[a-zA-Z0-9]+")
-    CONNECTED_PATTERN= re.compile(r"(connected|agent running)", re.IGNORECASE)
-    TUNNEL_PATTERN   = re.compile(r"([a-zA-Z0-9\-]+\.(gl\.)?(?:joinmc\.link|ply\.gg|playit\.gg)[:\d]*)", re.IGNORECASE)
+    CLAIM_PATTERN    = re.compile(r"https://playit\.gg/claim/[a-zA-Z0-9\-]+")
+    CONNECTED_PATTERN = re.compile(r"(connected|agent running|tunnel ready)", re.IGNORECASE)
+    TUNNEL_PATTERN   = re.compile(
+        r"([a-zA-Z0-9][\w\-]*\.(?:joinmc\.link|ply\.gg|playit\.gg)(?::\d+)?)",
+        re.IGNORECASE
+    )
 
     def _reader():
-        claim_opened = False
+        claim_opened       = False
         connected_notified = False
         try:
             for line in proc.stdout:
@@ -140,7 +170,6 @@ def start_agent(
                 if on_log:
                     on_log(line)
 
-                # クレームURL
                 if not claim_opened:
                     m = CLAIM_PATTERN.search(line)
                     if m:
@@ -148,27 +177,22 @@ def start_agent(
                         if on_claim_url:
                             on_claim_url(m.group(0))
 
-                # 接続確立
                 if not connected_notified and CONNECTED_PATTERN.search(line):
                     connected_notified = True
                     if on_connected:
                         on_connected()
 
-                # トンネルアドレス
                 if on_tunnel_addr:
                     m = TUNNEL_PATTERN.search(line)
                     if m:
                         on_tunnel_addr(m.group(0))
-
         except Exception:
             pass
         proc.wait()
         if on_exit:
             on_exit()
 
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
-
+    threading.Thread(target=_reader, daemon=True).start()
     return proc
 
 

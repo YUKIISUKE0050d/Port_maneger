@@ -298,15 +298,16 @@ class PortManagerApp(tk.Tk):
 
     def _download_playit_async(self):
         try:
-            playit_agent.download_playit()
-            self.after(0, lambda: self._on_playit_download_done(True, None))
+            dest, tag = playit_agent.download_playit()
+            self.after(0, lambda: self._on_playit_download_done(True, None, tag))
         except Exception as e:
-            self.after(0, lambda: self._on_playit_download_done(False, str(e)))
+            self.after(0, lambda: self._on_playit_download_done(False, str(e), ""))
 
-    def _on_playit_download_done(self, ok, err):
+    def _on_playit_download_done(self, ok, err, tag=""):
         self.status_label.config(text="管理者権限で実行中(自動取得済み)", foreground="green")
         if ok:
-            messagebox.showinfo("完了", "playitのダウンロードが完了しました。\n\n"
+            ver = f" ({tag})" if tag else ""
+            messagebox.showinfo("完了", f"playit{ver}のダウンロードが完了しました。\n\n"
                 "初回起動時にブラウザでクレーム承認が必要です。\n"
                 "承認後、playit.ggダッシュボードでトンネルを作成してください。")
         else:
